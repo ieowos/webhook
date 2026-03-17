@@ -8,7 +8,7 @@ app.use(express.json());
 // Переменные окружения (добавьте в Railway)
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY;
-const ADMIN_ID = process.env.ADMIN_ID || '891500580'; // Ваш Telegram ID для логов
+const ADMIN_ID = process.env.ADMIN_ID || '6966237267'; // Ваш Telegram ID для логов
 
 // Проверка наличия переменных
 if (!BOT_TOKEN || !YOOKASSA_SECRET_KEY) {
