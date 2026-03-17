@@ -5,21 +5,18 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
+// Переменные окружения (добавьте в Railway)
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY;
-const BOT_API_URL = 'https://rogue-lopik.amvera.io/api/add_balance';
+const ADMIN_ID = process.env.ADMIN_ID || '891500580'; // Ваш Telegram ID для логов
 
-// Проверка наличия обязательных переменных
-if (!BOT_TOKEN) {
-    console.error('❌ BOT_TOKEN не задан!');
+// Проверка наличия переменных
+if (!BOT_TOKEN || !YOOKASSA_SECRET_KEY) {
+    console.error('❌ Ошибка: BOT_TOKEN или YOOKASSA_SECRET_KEY не заданы!');
     process.exit(1);
 }
-if (!YOOKASSA_SECRET_KEY) {
-    console.error('❌ YOOKASSA_SECRET_KEY не задан!');
-    process.exit(1);
-}
-console.log('✅ Переменные окружения загружены');
 
+// Функция проверки подписи ЮKassa
 function verifySignature(body, signature) {
     try {
         const hmac = crypto.createHmac('sha256', YOOKASSA_SECRET_KEY);
@@ -31,34 +28,38 @@ function verifySignature(body, signature) {
     }
 }
 
-async function notifyUser(userId, amount) {
+// Отправка команды боту через Telegram API
+async function sendCommandToBot(userId, amount) {
     try {
+        // Отправляем команду /addbalance прямо пользователю
+        // Бот получит это как обычное сообщение и выполнит add_balance
         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
             chat_id: userId,
-            text: `✅ Баланс пополнен на ${amount} руб.`
+            text: `/addbalance ${amount}`
         });
-        console.log(`📨 Уведомление отправлено пользователю ${userId}`);
-    } catch (error) {
-        console.error(`❌ Ошибка отправки уведомления: ${error.message}`);
-    }
-}
-
-async function updateBalance(userId, amount) {
-    try {
-        await axios.post(BOT_API_URL, {
-            user_id: userId,
-            amount: amount
-        });
-        console.log(`💰 Баланс обновлён: user ${userId} +${amount}`);
+        console.log(`✅ Команда отправлена пользователю ${userId}: +${amount} руб.`);
         return true;
     } catch (error) {
-        console.error(`❌ Ошибка обновления баланса: ${error.message}`);
+        console.error(`❌ Ошибка отправки команды: ${error.message}`);
         return false;
     }
 }
 
+// Отправка уведомления админу (опционально)
+async function notifyAdmin(message) {
+    try {
+        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+            chat_id: ADMIN_ID,
+            text: message
+        });
+    } catch (error) {
+        console.error('❌ Ошибка уведомления админа:', error.message);
+    }
+}
+
+// Главный вебхук
 app.post('/webhook', async (req, res) => {
-    console.log('\n📩 ПОЛУЧЕН ВЕБХУК');
+    console.log('\n📩 ПОЛУЧЕН ВЕБХУК ОТ ЮKASSA');
     
     const signature = req.headers['x-yookassa-signature'];
     if (!signature) {
@@ -73,26 +74,33 @@ app.post('/webhook', async (req, res) => {
 
     console.log('✅ Подпись верна');
 
-    if (req.body.event === 'payment.succeeded') {
-        const { customerNumber, amount } = req.body.object;
-        console.log(`💰 Платёж: user=${customerNumber}, amount=${amount.value}`);
+    const data = req.body;
+    console.log(`📦 Событие: ${data.event}`);
+
+    if (data.event === 'payment.succeeded') {
+        const payment = data.object;
+        const userId = payment.customerNumber;
+        const amount = payment.amount.value;
         
-        if (customerNumber && amount) {
-            // Обновляем баланс через API бота
-            const updated = await updateBalance(customerNumber, amount.value);
+        console.log(`💰 Платёж: user=${userId}, amount=${amount} руб.`);
+        
+        if (userId && amount) {
+            // 1. Отправляем команду боту
+            const sent = await sendCommandToBot(userId, amount);
             
-            if (updated) {
-                // Отправляем уведомление пользователю
-                await notifyUser(customerNumber, amount.value);
+            // 2. Уведомляем админа
+            if (sent) {
+                await notifyAdmin(
+                    `💰 Пополнение баланса\n👤 Пользователь: ${userId}\n💵 Сумма: ${amount} руб.`
+                );
             }
         }
-    } else {
-        console.log(`ℹ️ Событие: ${req.body.event}`);
     }
     
     res.send('OK');
 });
 
+// Health check
 app.get('/health', (req, res) => {
     res.json({
         status: 'OK',
@@ -103,6 +111,6 @@ app.get('/health', (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-    console.log(`🚀 Webhook server running on port ${PORT}`);
-    console.log(`🔗 Бот API: ${BOT_API_URL}`);
+    console.log(`🚀 Webhook server запущен на порту ${PORT}`);
+    console.log(`🔗 URL вебхука: https://webhook-production-dc64.up.railway.app/webhook`);
 });
