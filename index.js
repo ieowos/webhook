@@ -22,7 +22,7 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-// Создаём таблицу при первом запуске (один раз)
+// Создаём таблицу при первом запуске
 pool.query(`
     CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT PRIMARY KEY,
@@ -38,7 +38,7 @@ async function notifyUser(userId, amount) {
     try {
         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
             chat_id: userId,
-            text: `✅ Оплата прошла успешно!\n\n💰 На баланс зачислено **${amount} ₽**`,
+            text: `✅ Оплата прошла успешно!\n\n💰 На баланс зачислено *${amount} ₽*`,
             parse_mode: 'Markdown'
         });
     } catch (e) {
@@ -60,34 +60,71 @@ async function notifyAdmin(text) {
 }
 
 app.post('/webhook', async (req, res) => {
+    // ИСПРАВЛЕНО: логируем полное тело вебхука для диагностики
     console.log('📩 Получен webhook от ЮKassa');
+    console.log('📦 Полное тело:', JSON.stringify(req.body, null, 2));
 
     const data = req.body;
 
     if (data.event === 'payment.succeeded') {
         const payment = data.object;
-        const userId = payment.customerNumber;
-        const amount = parseFloat(payment.amount.value);
+
+        console.log('💳 Объект платежа:', JSON.stringify(payment, null, 2));
+
+        // ИСПРАВЛЕНО: ищем userId в трёх местах по приоритету
+        // 1. metadata.user_id — если форма передала name="metadata[user_id]"
+        // 2. merchant_customer_id — если форма передала name="customerNumber"
+        // 3. description — запасной вариант
+        let userId =
+            (payment.metadata && payment.metadata.user_id) ||
+            payment.merchant_customer_id ||
+            null;
+
+        // Попытка вытащить из description если там что-то вроде "user:12345"
+        if (!userId && payment.description) {
+            const match = payment.description.match(/(\d{5,})/);
+            if (match) userId = match[1];
+        }
+
+        console.log(`🔍 userId найден: ${userId}`);
+
+        const amount = parseFloat(payment.amount && payment.amount.value);
 
         if (!userId || isNaN(amount) || amount <= 0) {
-            console.log('Некорректные данные платежа');
+            console.log('⚠️ userId не найден или сумма некорректна!');
+            // Отправляем админу дамп платежа для диагностики
+            await notifyAdmin(
+                `⚠️ <b>Платёж без userId!</b>\n\n` +
+                `Сумма: <b>${amount} ₽</b>\n\n` +
+                `<b>Дамп объекта платежа:</b>\n` +
+                `<pre>${JSON.stringify(payment, null, 2).slice(0, 3000)}</pre>`
+            );
             return res.send('OK');
         }
 
         console.log(`💰 Платёж: user=${userId}, сумма=${amount} ₽`);
 
         // Автоматическое пополнение (UPSERT)
-        await pool.query(`
-            INSERT INTO users (user_id, balance)
-            VALUES ($1, $2)
-            ON CONFLICT (user_id)
-            DO UPDATE SET balance = users.balance + $2
-        `, [userId, amount]);
+        try {
+            await pool.query(`
+                INSERT INTO users (user_id, balance)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id)
+                DO UPDATE SET balance = users.balance + $2
+            `, [userId, amount]);
 
-        console.log(`✅ Баланс пополнен автоматически`);
+            console.log(`✅ Баланс пользователя ${userId} пополнен на ${amount} ₽`);
 
-        await notifyUser(userId, amount);
-        await notifyAdmin(`💰 Автопополнение\nUser: <code>${userId}</code>\nСумма: <b>${amount} ₽</b>`);
+            await notifyUser(userId, amount);
+            await notifyAdmin(
+                `💰 <b>Автопополнение</b>\n` +
+                `User: <code>${userId}</code>\n` +
+                `Сумма: <b>${amount} ₽</b>`
+            );
+        } catch (dbErr) {
+            console.error('❌ Ошибка записи в БД:', dbErr.message);
+            await notifyAdmin(`❌ Ошибка БД при пополнении user ${userId}: ${dbErr.message}`);
+        }
     }
 
     res.send('OK');
